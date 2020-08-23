@@ -1,0 +1,156 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: >-
+  AWS CloudFormation Template to create a single AWS EC2 Instance JFrog Artifactory repository manager
+  using the artifactory pro version of docker image. 
+################ Paramenters #################
+Parameters:
+  AppName:
+    Type: String
+    Default: Artifactory
+  EC2KeyName:
+    Type: String
+    Default:  "centos7-personal"
+  AWSSSMMangedPolicy:
+    Type: String
+    Default: arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+  VpcId:
+      Type: AWS::EC2::VPC::Id	
+  Subnets:
+      Type: AWS::EC2::Subnet::Id
+ ############     Type: List<AWS::EC2::Subnet::Id>
+##################  EC2  Security Group ###########
+Resources:
+ ServerSecurityGroup:
+  Type: AWS::EC2::SecurityGroup
+  Properties:
+    GroupDescription: Ingress connections from specified CIDR ranges
+    SecurityGroupIngress:
+    - IpProtocol: tcp
+      FromPort: 80
+      ToPort: 80
+      CidrIp: 0.0.0.0/0
+    - IpProtocol: tcp
+      FromPort: 22
+      ToPort: 22
+      CidrIp: 0.0.0.0/0
+    - IpProtocol: tcp
+      FromPort: 8081
+      ToPort: 8081
+      CidrIp: 0.0.0.0/0
+    - IpProtocol: tcp
+      FromPort: 8082
+      ToPort: 8082
+      CidrIp: 0.0.0.0/0
+    #SubnetId: !Ref Subnets
+    Tags:
+    - 
+      Key: Name
+      Value: !Sub "${AWS::StackName}-SG"
+    VpcId: 
+      Ref: VpcId
+################  EC2  Instance ##################
+ EC2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+        ImageId: "ami-07d9160fa81ccffb5"
+        KeyName:  !Sub "${EC2KeyName}"
+        InstanceType: "t3.small"
+        SubnetId: !Sub "${Subnets}"
+        IamInstanceProfile: !Ref InstanceProfile
+        ###### Root Volume tag #######
+        UserData: 
+         Fn::Base64: |
+          #!/bin/sh
+            AWS_AVAIL_ZONE=$(curl http://169.254.169.254/latest/meta-data/placement/availability-zone)
+            AWS_REGION="`echo \"$AWS_AVAIL_ZONE\" | sed 's/[a-z]$//'`"
+            AWS_INSTANCE_ID=$(curl http://169.254.169.254/latest/meta-data/instance-id)
+            ROOT_VOLUME_IDS=$(aws ec2 describe-instances --region $AWS_REGION --instance-id $AWS_INSTANCE_ID --output text --query Reservations[0].Instances[0].BlockDeviceMappings[0].Ebs.VolumeId)
+            aws ec2 create-tags --resources $ROOT_VOLUME_IDS --region $AWS_REGION --tags Key=Name,Value=Artifactory
+            mkdir /tmp/ssm
+            cd /tmp/ssm
+            wget https://s3.amazonaws.com/ec2-downloads-windows/SSMAgent/latest/debian_amd64/amazon-ssm-agent.deb
+            sudo dpkg -i amazon-ssm-agent.deb
+            sudo systemctl enable amazon-ssm-agent
+            sudo yum update -y
+            sudo amazon-linux-extras install docker -y
+            echo "{
+           \"default-address-pools\": [
+            { \"base\": \"192.168.56.0/21\",\"size\": 28 }
+              ]
+             }" > /etc/docker/daemon.json
+            systemctl enable docker
+            systemctl start docker
+            docker pull docker.bintray.io/jfrog/artifactory-pro:latest
+            mkdir -p $JFROG_HOME/artifactory/var/etc/
+            cd $JFROG_HOME/artifactory/var/etc/
+            touch ./system.yaml
+            chown -R 1030:1030 $JFROG_HOME/artifactory/var
+            chmod -R 777 $JFROG_HOME/artifactory/var
+            ## create volume 
+            docker volume create --name=artifactory_data
+            ## run the container with docker volume 
+            docker run --name artifactory -v artifactory_data:/var/opt/jfrog/artifactory -d -p 8081:8081 -p 8082:8082 docker.bintray.io/jfrog/artifactory-pro:latest
+        Tags:
+           -
+             Key: Name
+             Value: Artifactory-Instance
+           - 
+             Key: OS
+             Value: Debian-Linux
+        ##SecurityGroups:
+        SecurityGroupIds:
+        - !GetAtt ServerSecurityGroup.GroupId
+        #- !Ref ServerSecurityGroup
+        BlockDeviceMappings:
+        -
+          DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize:  30
+            VolumeType: gp2
+            DeleteOnTermination: false
+            Encrypted: true
+    DependsOn: InstanceProfile  
+ #AMI role given to the instances, the instances need the describe and create tags to complete UserData
+ InstanceRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      Policies:
+        - PolicyName: taginstancepolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'ec2:Describe*'
+                  - 'ec2:CreateTags'
+                Resource: '*'
+      ManagedPolicyArns:
+         -  !Ref AWSSSMMangedPolicy
+ InstanceProfile:
+    Type: 'AWS::IAM::InstanceProfile'
+    Properties:
+      Path: /
+      Roles:
+        - !Ref InstanceRole
+##############   Outputs #######################
+Outputs:
+ PrivateIP:
+    Description: Information about the value
+    Value: !GetAtt EC2Instance.PrivateIp
+    Export:
+      Name:  !Sub "${AWS::StackName}PrivateIP"
+ InstanceID:
+    Description: Information about the value
+    Value: !Ref EC2Instance
+    Export:
+      Name:  !Sub "${AWS::StackName}InstanceID"
